@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <RootNamespace>Zomboid</RootNamespace>
+        <IsPackable>false</IsPackable>
+        <!-- Generated wrappers mirror Java, where hiding inherited members is routine. -->
+        <NoWarn>$(NoWarn);CS0108;CS0114</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="Wrench.Host" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Wrench.Api\Wrench.Api.csproj" />
+    </ItemGroup>
+
+</Project>
