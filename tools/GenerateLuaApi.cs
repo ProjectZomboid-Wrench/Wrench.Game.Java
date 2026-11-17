@@ -1,4 +1,7 @@
-// Regenerates Wrench.Game/Generated/ from the classes PZ exposes to Lua: dotnet run tools/GenerateLuaApi.cs -- <projectzomboid.jar>
+// Regenerates Wrench.Game/Generated/ from the classes PZ exposes to Lua:
+//   dotnet run tools/GenerateLuaApi.cs -- <projectzomboid.jar> [<pz-rosetta-source checkout>]
+// Rosetta (github.com/PZ-Umbrella/pz-rosetta-source, CC BY 4.0) supplies parameter names and docs the jar lacks.
+#:package YamlDotNet@16.3.0
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -19,15 +22,31 @@ try
         Path.GetDirectoryName(jar));
 
     var model = Model.Parse(dump);
+    var rosetta = args.Length > 1 ? Rosetta.Load(Path.GetFullPath(args[1]), GitCommit(Path.GetFullPath(args[1]))) : null;
     if (Directory.Exists(output))
         Directory.Delete(output, recursive: true);
     Directory.CreateDirectory(output);
-    var files = new Generator(model).Write(output);
+    var generator = new Generator(model, rosetta);
+    var files = generator.Write(output);
     Console.WriteLine($"{model.Classes.Count} classes, {model.Globals.Count} globals -> {files} files in {output}");
+    if (rosetta is not null)
+        Console.WriteLine($"Rosetta {rosetta.Commit}: documented {generator.Documented} of {generator.Documentable} members");
 }
 finally
 {
     Directory.Delete(work, recursive: true);
+}
+
+static string GitCommit(string checkout)
+{
+    try
+    {
+        return Run("git", ["-C", checkout, "rev-parse", "--short", "HEAD"]).Trim();
+    }
+    catch (Exception)
+    {
+        return "(unknown commit)";
+    }
 }
 
 // Exposer.exposeAll calls setExposed(Class) once per class, plus static setExposed(Exposer) helpers on a few classes.
@@ -72,7 +91,7 @@ static string Run(string file, string[] arguments, string? workingDirectory = nu
     return stdout;
 }
 
-sealed record JType(string Name, JType[] Args, int Rank)
+sealed record JType(string Name, JType[] Args, int Rank, bool VarArgs = false)
 {
     private static readonly HashSet<string> Primitives = ["boolean", "byte", "short", "char", "int", "long", "float", "double", "void"];
 
@@ -86,6 +105,8 @@ sealed record JType(string Name, JType[] Args, int Rank)
     public static JType Parse(string text)
     {
         text = text.Trim();
+        if (text.EndsWith("...", StringComparison.Ordinal))
+            return Parse(text[..^3] + "[]") with { VarArgs = true };
         var rank = 0;
         while (text.EndsWith("[]", StringComparison.Ordinal))
         {
@@ -136,6 +157,94 @@ sealed record JType(string Name, JType[] Args, int Rank)
 }
 
 sealed record JMethod(bool IsStatic, string Name, string DeclaringClass, JType Return, JType[] Parameters);
+
+sealed record RParameter(string Name, string? Notes);
+
+sealed record RMember(string Name, string[] TypeKeys, RParameter[] Parameters, string? Notes, string? ReturnNotes);
+
+/// <summary>Rosetta's per-class YAML (rosetta/java/&lt;package&gt;/&lt;Outer.Inner&gt;.yml): parameter names and notes per overload.</summary>
+sealed class Rosetta
+{
+    private readonly Dictionary<string, List<RMember>> _methods = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<RMember>> _constructors = new(StringComparer.Ordinal);
+
+    private Rosetta(string commit) => Commit = commit;
+
+    public string Commit { get; }
+
+    public static Rosetta Load(string checkout, string commit)
+    {
+        var rosetta = new Rosetta(commit);
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(checkout, "rosetta", "java"), "*.yml", SearchOption.AllDirectories))
+        {
+            var yaml = new YamlDotNet.RepresentationModel.YamlStream();
+            using (var reader = File.OpenText(file))
+                yaml.Load(reader);
+            if (Child(Child(Child(yaml.Documents[0].RootNode, "languages"), "java"), "packages") is not YamlDotNet.RepresentationModel.YamlMappingNode packages)
+                continue;
+            foreach (var (package, classes) in packages.Children)
+            {
+                foreach (var (name, body) in ((YamlDotNet.RepresentationModel.YamlMappingNode)classes).Children)
+                {
+                    var javaName = $"{package}.{name.ToString().Replace('.', '$')}";
+                    // A class can appear in more than one file (an outer class's file may list its nested classes too).
+                    Add(rosetta._methods, javaName, Members(Child(body, "methods"), named: true));
+                    Add(rosetta._methods, javaName, Members(Child(body, "staticMethods"), named: true));
+                    Add(rosetta._constructors, javaName, Members(Child(body, "constructors"), named: false));
+                }
+            }
+        }
+        return rosetta;
+    }
+
+    public RMember? Method(string javaClass, string name, JType[] parameters) =>
+        Find(_methods, javaClass, name, parameters);
+
+    public RMember? Constructor(string javaClass, JType[] parameters) => Find(_constructors, javaClass, "", parameters);
+
+    public static string TypeKey(JType type) => (type.IsTypeVariable ? "?" : type.Name) + string.Concat(Enumerable.Repeat("[]", type.Rank));
+
+    private static RMember? Find(Dictionary<string, List<RMember>> members, string javaClass, string name, JType[] parameters)
+    {
+        if (!members.TryGetValue(javaClass, out var candidates))
+            return null;
+        var keys = parameters.Select(TypeKey).ToArray();
+        return candidates.FirstOrDefault(m => m.Name == name && m.TypeKeys.Length == keys.Length
+                                              && m.TypeKeys.Zip(keys).All(k => k.First == k.Second || k.First == "?" || k.Second == "?"));
+    }
+
+    private static void Add(Dictionary<string, List<RMember>> members, string javaName, List<RMember> found)
+    {
+        if (members.TryGetValue(javaName, out var existing))
+            existing.AddRange(found);
+        else
+            members[javaName] = found;
+    }
+
+    private static List<RMember> Members(YamlDotNet.RepresentationModel.YamlNode? list, bool named)
+    {
+        var result = new List<RMember>();
+        if (list is not YamlDotNet.RepresentationModel.YamlSequenceNode sequence)
+            return result;
+        foreach (var member in sequence.Children)
+        {
+            var parameters = Child(member, "parameters") is YamlDotNet.RepresentationModel.YamlSequenceNode ps ? ps.Children : [];
+            result.Add(new RMember(
+                named ? Text(member, "name") ?? "" : "",
+                [.. parameters.Select(p => TypeKey(JType.Parse(Text(Child(p, "type"), "full") ?? "java.lang.Object")))],
+                [.. parameters.Select(p => new RParameter(Text(p, "name") ?? "", Text(p, "notes")))],
+                Text(member, "notes"),
+                Text(Child(member, "return"), "notes")));
+        }
+        return result;
+    }
+
+    private static YamlDotNet.RepresentationModel.YamlNode? Child(YamlDotNet.RepresentationModel.YamlNode? node, string key) =>
+        node is YamlDotNet.RepresentationModel.YamlMappingNode map && map.Children.TryGetValue(key, out var value) ? value : null;
+
+    private static string? Text(YamlDotNet.RepresentationModel.YamlNode? node, string key) =>
+        Child(node, key) is YamlDotNet.RepresentationModel.YamlScalarNode { Value: { Length: > 0 } value } ? value : null;
+}
 
 sealed class JClass(string name, string? superclass, string flags, string simpleName)
 {
@@ -227,12 +336,16 @@ sealed class Generator
         "JavaStatic", "JavaStaticVoid", "JavaField", "MemberwiseClone", "Finalize", "ReferenceEquals",
     ];
 
+    private const string GlobalObject = "zombie.Lua.LuaManager$GlobalObject";
+
+    private readonly Rosetta? _rosetta;
     private readonly Dictionary<string, JClass> _classes;
     private readonly Dictionary<string, string> _csNames = new(StringComparer.Ordinal);
     private readonly HashSet<string> _uniqueSimpleNames;
 
-    public Generator(Model model)
+    public Generator(Model model, Rosetta? rosetta)
     {
+        _rosetta = rosetta;
         _classes = model.Classes.Where(c => !c.Name.StartsWith("java.", StringComparison.Ordinal))
             .ToDictionary(c => c.Name, StringComparer.Ordinal);
         Globals = model.Globals;
@@ -243,6 +356,10 @@ sealed class Generator
     }
 
     private List<JGlobal> Globals { get; }
+
+    public int Documented { get; private set; }
+
+    public int Documentable { get; private set; }
 
     public int Write(string directory)
     {
@@ -278,10 +395,13 @@ sealed class Generator
         return files + 2;
     }
 
-    private static void Header(StringBuilder code) =>
-        code.AppendLine("// <auto-generated>tools/GenerateLuaApi.cs from the classes PZ exposes to Lua. Don't edit.</auto-generated>")
-            .AppendLine("#nullable disable")
-            .AppendLine();
+    private void Header(StringBuilder code)
+    {
+        code.AppendLine("// <auto-generated>tools/GenerateLuaApi.cs from the classes PZ exposes to Lua. Don't edit.</auto-generated>");
+        if (_rosetta is not null)
+            code.AppendLine($"// Parameter names and documentation: pz-rosetta-source {_rosetta.Commit} (https://github.com/PZ-Umbrella/pz-rosetta-source), CC BY 4.0.");
+        code.AppendLine("#nullable disable").AppendLine();
+    }
 
     private void WriteClass(StringBuilder code, JClass type, string indent)
     {
@@ -304,8 +424,10 @@ sealed class Generator
         var inherited = BaseClass(type) is { } baseClass ? InstanceKeys(baseClass) : [];
         var instance = type.Methods
             .Where(m => !m.IsStatic && !SkippedMethods.Contains(m.Name) && IsJavaIdentifier(m.Name))
-            .GroupBy(Key).Select(g => g.First())
+            .GroupBy(Key).Select(Preferred)
             .Where(m => !inherited.Contains(Key(m)))
+            // Reflection's method order varies between runs; sorting keeps regenerations diffable.
+            .OrderBy(m => m.Name, StringComparer.Ordinal).ThenBy(Key, StringComparer.Ordinal)
             .ToList();
 
         var body = new StringBuilder();
@@ -313,6 +435,8 @@ sealed class Generator
         foreach (var (propertyName, getter, setter) in asProperties)
         {
             var csType = Map(getter.Return);
+            var doc = Lookup(getter.DeclaringClass, getter.Name, getter.Parameters) ?? Lookup(setter.DeclaringClass, setter.Name, setter.Parameters);
+            Summary(body, indent, doc?.Notes ?? doc?.ReturnNotes);
             body.AppendLine($"{indent}    public {csType} {propertyName}")
                 .AppendLine($"{indent}    {{")
                 .AppendLine($"{indent}        get => JavaCall<{csType}>(this, \"{getter.Name}\");")
@@ -322,7 +446,9 @@ sealed class Generator
         var paired = asProperties.SelectMany(p => new[] { p.Getter, p.Setter }).ToHashSet();
         foreach (var method in instance.Where(m => !paired.Contains(m)))
         {
-            var parameters = Parameters(method.Parameters);
+            var doc = Lookup(method.DeclaringClass, method.Name, method.Parameters);
+            var parameters = Parameters(method.Parameters, doc);
+            Document(body, indent, doc, parameters.Names);
             var csName = members.Method(Pascal(method.Name), parameters.Types);
             var returnType = Map(method.Return);
             var call = method.Return.IsVoid
@@ -337,18 +463,26 @@ sealed class Generator
             var table = type.SimpleName;
             if (!type.IsAbstract && !type.IsInterface)
             {
-                foreach (var constructor in type.Constructors)
+                foreach (var constructor in type.Constructors.OrderBy(c => string.Join(",", c.Select(Map)), StringComparer.Ordinal))
                 {
-                    var parameters = Parameters(constructor);
+                    Documentable++;
+                    var doc = _rosetta?.Constructor(type.Name, constructor);
+                    if (doc is not null)
+                        Documented++;
+                    var parameters = Parameters(constructor, doc);
+                    Document(body, indent, doc, parameters.Names);
                     var csName = members.Method("New", parameters.Types);
                     body.AppendLine($"{indent}    public static {name} {csName}({parameters.Declaration}) => " +
                                     $"JavaStatic<{name}>(\"{table}\", \"new\"{parameters.Arguments});");
                 }
             }
             foreach (var method in type.Methods.Where(m => m.IsStatic && m.DeclaringClass == type.Name && IsJavaIdentifier(m.Name))
-                         .GroupBy(Key).Select(g => g.First()))
+                         .GroupBy(Key).Select(Preferred)
+                         .OrderBy(m => m.Name, StringComparer.Ordinal).ThenBy(Key, StringComparer.Ordinal))
             {
-                var parameters = Parameters(method.Parameters);
+                var doc = Lookup(method.DeclaringClass, method.Name, method.Parameters);
+                var parameters = Parameters(method.Parameters, doc);
+                Document(body, indent, doc, parameters.Names);
                 var csName = members.Method(Pascal(method.Name), parameters.Types);
                 var returnType = Map(method.Return);
                 var call = method.Return.IsVoid
@@ -395,28 +529,90 @@ sealed class Generator
         return result;
     }
 
+    // Declarations that map to one C# signature (an override, a varargs twin) come in reflection order, which varies.
+    private static JMethod Preferred(IEnumerable<JMethod> sameSignature) =>
+        sameSignature.OrderByDescending(m => m.Parameters.LastOrDefault()?.VarArgs == true)
+            .ThenBy(m => m.DeclaringClass, StringComparer.Ordinal).First();
+
     private HashSet<string> InstanceKeys(JClass type) =>
         type.Methods.Where(m => !m.IsStatic).Select(Key).ToHashSet();
 
     private string Key(JMethod method) => method.Name + "(" + string.Join(",", method.Parameters.Select(Map)) + ")";
 
-    private (string Declaration, string Arguments, string Types) Parameters(JType[] types)
+    private RMember? Lookup(string javaClass, string name, JType[] parameters)
+    {
+        if (_rosetta is null)
+            return null;
+        Documentable++;
+        var doc = _rosetta.Method(javaClass, name, parameters);
+        if (doc is not null)
+            Documented++;
+
+        return doc;
+    }
+
+    private (string Declaration, string Arguments, string Types, string[] Names) Parameters(JType[] types, RMember? doc = null)
     {
         var used = new HashSet<string>();
         var declarations = new List<string>();
         var names = new List<string>();
-        foreach (var type in types)
+        for (var index = 0; index < types.Length; index++)
         {
+            var type = types[index];
             var csType = Map(type);
-            var baseName = ParameterName(type, csType);
+            var documented = doc?.Parameters[index].Name;
+            // Rosetta keeps the jar's arg0, arg1, ... where nobody has named a parameter yet.
+            var baseName = documented is not null && IsJavaIdentifier(documented) && !Regex.IsMatch(documented, @"^arg\d+$")
+                ? documented
+                : ParameterName(type, csType);
             var parameterName = baseName;
             for (var i = 2; !used.Add(parameterName); i++)
                 parameterName = baseName + i;
             var escaped = Keywords.Contains(parameterName) ? "@" + parameterName : parameterName;
-            declarations.Add($"{csType} {escaped}");
             names.Add(escaped);
+            if (type.VarArgs)
+            {
+                // Kahlua spreads trailing Lua arguments into a Java varargs array, so C# spreads them too.
+                declarations.Add($"params {Map(type with { Rank = type.Rank - 1, VarArgs = false })}[] {escaped}");
+                var fixedArguments = string.Concat(names.SkipLast(1).Select(n => n + ", "));
+                return (string.Join(", ", declarations), $", [{fixedArguments}.. {escaped}]", string.Join(",", types.Select(Map)), [.. names]);
+            }
+            declarations.Add($"{csType} {escaped}");
         }
-        return (string.Join(", ", declarations), string.Concat(names.Select(n => ", " + n)), string.Join(",", types.Select(Map)));
+        return (string.Join(", ", declarations), string.Concat(names.Select(n => ", " + n)), string.Join(",", types.Select(Map)),
+            [.. names]);
+    }
+
+    private static void Summary(StringBuilder body, string indent, string? notes)
+    {
+        if (Clean(notes) is { } summary)
+            body.AppendLine($"{indent}    /// <summary>{summary}</summary>");
+    }
+
+    private static void Document(StringBuilder body, string indent, RMember? doc, string[] names)
+    {
+        if (doc is null)
+            return;
+        Summary(body, indent, doc.Notes);
+        for (var i = 0; i < names.Length && i < doc.Parameters.Length; i++)
+        {
+            if (Clean(doc.Parameters[i].Notes) is { } notes && !IsBoilerplate(notes, doc.Parameters[i].Name))
+                body.AppendLine($"{indent}    /// <param name=\"{names[i].TrimStart('@')}\">{notes}</param>");
+        }
+        if (Clean(doc.ReturnNotes) is { } returns)
+            body.AppendLine($"{indent}    /// <returns>{returns}</returns>");
+    }
+
+    // Old javadoc stubs say "@param active the active to set", which tells a reader nothing.
+    private static bool IsBoilerplate(string notes, string name) =>
+        Regex.IsMatch(notes, $@"^the {Regex.Escape(name)}( to set)?\.?$", RegexOptions.IgnoreCase);
+
+    private static string? Clean(string? notes)
+    {
+        if (string.IsNullOrWhiteSpace(notes))
+            return null;
+        var text = Regex.Replace(notes.Trim(), @"\s+", " ");
+        return text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
     }
 
     private string ParameterName(JType type, string csType)
@@ -465,12 +661,17 @@ sealed class Generator
             .AppendLine("public static class Globals")
             .AppendLine("{");
         var members = new Members(["Globals"]);
-        foreach (var global in Globals.Where(g => IsJavaIdentifier(g.LuaName)).OrderBy(g => g.LuaName, StringComparer.Ordinal))
+        foreach (var global in Globals.Where(g => IsJavaIdentifier(g.LuaName)).OrderBy(g => g.LuaName, StringComparer.Ordinal)
+                     .ThenBy(g => string.Join(",", g.Parameters.Select(Map)), StringComparer.Ordinal))
         {
-            var parameters = Parameters(global.Parameters);
+            var doc = Lookup(GlobalObject, global.LuaName, global.Parameters);
+            var parameters = Parameters(global.Parameters, doc);
+            Document(code, "", doc, parameters.Names);
             var csName = members.Method(Pascal(global.LuaName), parameters.Types);
             var returnType = Map(global.Return);
-            var arguments = $"[{parameters.Arguments.TrimStart(',', ' ')}]";
+            var arguments = parameters.Arguments.StartsWith(", [", StringComparison.Ordinal)
+                ? parameters.Arguments[2..]
+                : $"[{parameters.Arguments.TrimStart(',', ' ')}]";
             var call = global.Return.IsVoid
                 ? $"JavaObject.CallGlobalVoid(\"{global.LuaName}\", {arguments})"
                 : $"JavaObject.CallGlobal<{returnType}>(\"{global.LuaName}\", {arguments})";

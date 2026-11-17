@@ -13,18 +13,19 @@ import zombie.Lua.LuaManager;
 /**
  * Dumps what PZ exposes to Lua, as Kahlua's LuaJavaClassExposer sees it (public methods via getMethods, constructors,
  * public static fields), for tools/GenerateLuaApi.cs. The class list comes from the Exposer's bytecode.
- * Tab-separated lines: C class super flags simpleName | M static name declaringClass return params... | K params... |
+ * Varargs parameters end in "...". Tab-separated lines: C class nearestExposedSuperclass flags simpleName | M static name declaringClass return params... | K params... |
  * F name type | G luaName return params...
  */
 public final class LuaApiDump {
+    private static final TreeMap<String, Class<?>> sorted = new TreeMap<>();
+
     public static void main(String[] args) throws Exception {
-        var sorted = new TreeMap<String, Class<?>>();
         var loader = LuaApiDump.class.getClassLoader();
         for (var name : Files.readAllLines(Path.of(args[0]))) {
             if (name.isBlank())
                 continue;
             try {
-                sorted.put(name, Class.forName(name.trim(), false, loader));
+                sorted.put(name.trim(), Class.forName(name.trim(), false, loader));
             } catch (Throwable e) {
                 System.err.println("can't load " + name + ": " + e);
             }
@@ -37,7 +38,10 @@ public final class LuaApiDump {
     static void dumpClass(Class<?> type) {
         String flags = (type.isEnum() ? "enum " : "") + (type.isInterface() ? "interface " : "")
                 + (Modifier.isAbstract(type.getModifiers()) ? "abstract" : "");
+        // Unexposed classes in between (IsoPlayer extends IsoLivingCharacter extends IsoGameCharacter) are skipped.
         var superclass = type.getSuperclass();
+        while (superclass != null && !sorted.containsKey(superclass.getName()))
+            superclass = superclass.getSuperclass();
         print("C", type.getName(), superclass == null ? "-" : superclass.getName(), flags.trim(), type.getSimpleName());
         Method[] methods;
         try {
@@ -53,13 +57,12 @@ public final class LuaApiDump {
             line.append(Modifier.isStatic(method.getModifiers()) ? "1" : "0").append('\t').append(method.getName())
                     .append('\t').append(method.getDeclaringClass().getName())
                     .append('\t').append(name(method.getGenericReturnType()));
-            for (var parameter : method.getGenericParameterTypes())
-                line.append('\t').append(name(parameter));
+            line.append(parameters(method.getGenericParameterTypes(), method.isVarArgs()));
             print("M", line.toString());
         }
         if (!Modifier.isAbstract(type.getModifiers()) && !type.isInterface()) {
             for (Constructor<?> constructor : type.getConstructors())
-                print("K", String.join("\t", Arrays.stream(constructor.getGenericParameterTypes()).map(LuaApiDump::name).toList()));
+                print("K", parameters(constructor.getGenericParameterTypes(), constructor.isVarArgs()).substring(Math.min(1, constructor.getParameterCount())));
         }
         for (Field field : type.getFields()) {
             if (Modifier.isStatic(field.getModifiers()) && field.getDeclaringClass() == type)
@@ -74,10 +77,19 @@ public final class LuaApiDump {
                 continue;
             var line = new StringBuilder(annotation.name().isEmpty() ? method.getName() : annotation.name());
             line.append('\t').append(name(method.getGenericReturnType()));
-            for (var parameter : method.getGenericParameterTypes())
-                line.append('\t').append(name(parameter));
+            line.append(parameters(method.getGenericParameterTypes(), method.isVarArgs()));
             print("G", line.toString());
         }
+    }
+
+    // Tab-prefixed parameter types; a varargs parameter ends in "..." instead of "[]".
+    static String parameters(Type[] types, boolean varArgs) {
+        var line = new StringBuilder();
+        for (var i = 0; i < types.length; i++) {
+            var text = name(types[i]);
+            line.append('\t').append(varArgs && i == types.length - 1 ? text.substring(0, text.length() - 2) + "..." : text);
+        }
+        return line.toString();
     }
 
     static String name(Type type) {
