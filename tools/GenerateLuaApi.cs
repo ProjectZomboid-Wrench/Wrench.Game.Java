@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 var jar = Path.GetFullPath(args[0]);
 var repo = Directory.GetCurrentDirectory();
-var output = Path.Combine(repo, "Wrench.Game", "Generated");
+var output = Path.Combine(repo, "Wrench.Game.Java", "Generated");
 var work = Path.Combine(Path.GetTempPath(), "wrench-luaapi-" + Environment.ProcessId);
 Directory.CreateDirectory(work);
 
@@ -377,7 +377,7 @@ sealed class Generator
 
         var registry = new StringBuilder();
         Header(registry);
-        registry.AppendLine("namespace Zomboid;").AppendLine()
+        registry.AppendLine("namespace Zomboid.Java;").AppendLine()
             .AppendLine("internal static partial class JavaTypes")
             .AppendLine("{")
             .AppendLine("    static partial void Register(Dictionary<string, Func<global::Wrench.GameObject, JavaObject>> byJavaName,")
@@ -406,7 +406,7 @@ sealed class Generator
     private void WriteClass(StringBuilder code, JClass type, string indent)
     {
         var name = CsSimpleName(type.Name);
-        var baseType = BaseClass(type) is { } b ? "global::" + _csNames[b.Name] : "global::Zomboid.JavaObject";
+        var baseType = BaseClass(type) is { } b ? "global::" + _csNames[b.Name] : "global::Zomboid.Java.JavaObject";
         var nested = _classes.Values.Where(c => Outer(c.Name) == type.Name).OrderBy(c => c.Name, StringComparer.Ordinal).ToList();
 
         var reserved = new HashSet<string>(ReservedMembers) { name };
@@ -619,7 +619,7 @@ sealed class Generator
     {
         if (type.Rank > 0)
             return "array";
-        if (csType.StartsWith("global::Zomboid.JavaList", StringComparison.Ordinal))
+        if (csType.StartsWith("global::Zomboid.Java.JavaList", StringComparison.Ordinal))
             return "list";
         if (_classes.ContainsKey(type.Name))
             return Camel(CsSimpleName(type.Name));
@@ -643,7 +643,7 @@ sealed class Generator
         if (ListTypes.Contains(type.Name))
         {
             var element = type.Args.Length == 1 ? Map(type.Args[0]) : "object";
-            return $"global::Zomboid.JavaList<{(element == "void" ? "object" : element)}>";
+            return $"global::Zomboid.Java.JavaList<{(element == "void" ? "object" : element)}>";
         }
         return _csNames.TryGetValue(type.Name, out var cs) ? "global::" + cs : "global::Wrench.GameObject";
     }
@@ -656,8 +656,8 @@ sealed class Generator
     {
         var code = new StringBuilder();
         Header(code);
-        code.AppendLine("namespace Zomboid;").AppendLine()
-            .AppendLine("/// <summary>PZ's global Lua functions (getPlayer, getText, ...), typed. <c>using static Zomboid.Globals;</c> reads like Lua.</summary>")
+        code.AppendLine("namespace Zomboid.Java;").AppendLine()
+            .AppendLine("/// <summary>PZ's global Lua functions (getPlayer, getText, ...), typed. <c>using static Zomboid.Java.Globals;</c> reads like Lua.</summary>")
             .AppendLine("public static class Globals")
             .AppendLine("{");
         var members = new Members(["Globals"]);
@@ -707,12 +707,13 @@ sealed class Generator
 
     private static string Namespace(string package)
     {
+        // zombie.Lua would read as Lua-side types next to Zomboid.Lua, so it's named for what it is.
+        if (package == "zombie.Lua" || package.StartsWith("zombie.Lua.", StringComparison.Ordinal))
+            package = "zombie.LuaBindings" + package["zombie.Lua".Length..];
         var segments = package.Split('.').Select(Pascal).ToList();
         if (segments[0] == "Zombie")
-            segments[0] = "Zomboid";
-        else
-            segments.Insert(0, "Zomboid");
-        return string.Join(".", segments);
+            segments.RemoveAt(0);
+        return string.Join(".", ["Zomboid", "Java", .. segments]);
     }
 
     private static bool IsJavaIdentifier(string name) => Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]*$");
