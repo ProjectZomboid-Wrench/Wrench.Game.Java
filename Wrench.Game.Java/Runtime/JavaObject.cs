@@ -6,7 +6,7 @@ namespace Zomboid.Java;
 /// Base of the generated wrappers for the Java classes PZ exposes to Lua. A wrapper is a typed view of a
 /// <see cref="GameObject"/>, so it has the same lifetime: valid during the handler or call that produced it.
 /// </summary>
-public abstract class JavaObject : IEquatable<JavaObject>
+public abstract class JavaObject : IEquatable<JavaObject>, IGameObjectView
 {
     private readonly GameObject _ref;
 
@@ -14,6 +14,8 @@ public abstract class JavaObject : IEquatable<JavaObject>
 
     /// <summary>The underlying object, for members the generated API doesn't cover (use it as <c>dynamic</c>).</summary>
     public GameObject AsGameObject() => _ref;
+
+    GameObject IGameObjectView.View => _ref;
 
     /// <summary>Views this object as another wrapper type, e.g. an interface it implements. Unchecked.</summary>
     public T As<T>() where T : JavaObject => JavaTypes.Create<T>(_ref);

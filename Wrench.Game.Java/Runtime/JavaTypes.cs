@@ -15,6 +15,10 @@ internal static partial class JavaTypes
 
     public static T Create<T>(GameObject handle) where T : JavaObject => (T)Create(typeof(T), handle);
 
+    /// <summary>The wrapper for the object's exact class, or null if that class isn't exposed.</summary>
+    public static JavaObject? CreateExact(GameObject handle) =>
+        ByJavaName.TryGetValue(handle.TypeName, out var exact) ? exact(handle) : null;
+
     public static JavaObject Create(Type type, GameObject handle)
     {
         if (ByJavaName.TryGetValue(handle.TypeName, out var exact))
