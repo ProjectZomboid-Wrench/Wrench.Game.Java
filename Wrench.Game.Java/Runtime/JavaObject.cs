@@ -15,7 +15,9 @@ public abstract class JavaObject : IEquatable<JavaObject>, IGameObjectView
     /// <summary>The underlying object, for members the generated API doesn't cover (use it as <c>dynamic</c>).</summary>
     public GameObject AsGameObject() => _ref;
 
-    GameObject IGameObjectView.View => _ref;
+    GameObject IGameObjectView.View => Ref;
+
+    private GameObject Ref => _ref.IsValid ? _ref : throw _ref.Expired(GetType().Name);
 
     /// <summary>Views this object as another wrapper type, e.g. an interface it implements. Unchecked.</summary>
     public T As<T>() where T : JavaObject => JavaTypes.Create<T>(_ref);
@@ -33,10 +35,10 @@ public abstract class JavaObject : IEquatable<JavaObject>, IGameObjectView
     public static bool operator !=(JavaObject? a, JavaObject? b) => !(a == b);
 
     protected static T JavaCall<T>(JavaObject self, string method, params object?[] args) =>
-        JavaConvert.To<T>(First(LuaHost.Required.CallMethod(null, self._ref, method, Unwrap(args))));
+        JavaConvert.To<T>(First(LuaHost.Required.CallMethod(null, self.Ref, method, Unwrap(args))));
 
     protected static void JavaCallVoid(JavaObject self, string method, params object?[] args) =>
-        LuaHost.Required.CallMethod(null, self._ref, method, Unwrap(args));
+        LuaHost.Required.CallMethod(null, self.Ref, method, Unwrap(args));
 
     protected static T JavaStatic<T>(string table, string function, params object?[] args) =>
         JavaConvert.To<T>(First(LuaHost.Required.Call(null, StaticFunction(table, function), Unwrap(args))));
@@ -68,7 +70,7 @@ public abstract class JavaObject : IEquatable<JavaObject>, IGameObjectView
         for (var i = 0; i < args.Length; i++)
         {
             if (args[i] is JavaObject wrapper)
-                args[i] = wrapper._ref;
+                args[i] = wrapper.Ref;
         }
         return args;
     }
