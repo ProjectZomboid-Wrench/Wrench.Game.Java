@@ -5,7 +5,6 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <RootNamespace>Zomboid.Java</RootNamespace>
-        <IsPackable>false</IsPackable>
         <!-- Generated wrappers mirror Java, where hiding inherited members is routine. -->
         <NoWarn>$(NoWarn);CS0108;CS0114</NoWarn>
     </PropertyGroup>
@@ -16,7 +15,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\Wrench.Api\Wrench.Api.csproj" />
+        <PackageReference Include="Wrench.Api" Version="$(WrenchApiVersion)" />
     </ItemGroup>
 
 </Project>
