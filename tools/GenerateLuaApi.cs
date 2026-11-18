@@ -2,9 +2,14 @@
 //   dotnet run tools/GenerateLuaApi.cs -- <projectzomboid.jar> [<pz-rosetta-source checkout>]
 // Rosetta (github.com/PZ-Umbrella/pz-rosetta-source, CC BY 4.0) supplies parameter names and docs the jar lacks.
 #:package YamlDotNet@16.3.0
-using System.Diagnostics;
+#:include Shared/Tool.cs
+#:include Shared/CSharpNames.cs
+#:include Shared/Yaml.cs
 using System.Text;
 using System.Text.RegularExpressions;
+using static CSharpNames;
+using static Tool;
+using static Y;
 
 var jar = Path.GetFullPath(args[0]);
 var repo = Directory.GetCurrentDirectory();
@@ -37,18 +42,6 @@ finally
     Directory.Delete(work, recursive: true);
 }
 
-static string GitCommit(string checkout)
-{
-    try
-    {
-        return Run("git", ["-C", checkout, "rev-parse", "--short", "HEAD"]).Trim();
-    }
-    catch (Exception)
-    {
-        return "(unknown commit)";
-    }
-}
-
 // Exposer.exposeAll calls setExposed(Class) once per class, plus static setExposed(Exposer) helpers on a few classes.
 static List<string> ExposedClassNames(string jar)
 {
@@ -73,22 +66,6 @@ static List<string> ExposedClassNames(string jar)
         lastClass = null;
     }
     return [.. names];
-}
-
-static string Run(string file, string[] arguments, string? workingDirectory = null)
-{
-    var start = new ProcessStartInfo(file, arguments) { RedirectStandardOutput = true, RedirectStandardError = true };
-    if (workingDirectory is not null)
-        start.WorkingDirectory = workingDirectory;
-    using var process = Process.Start(start)!;
-    var stderr = process.StandardError.ReadToEndAsync();
-    var stdout = process.StandardOutput.ReadToEnd();
-    process.WaitForExit();
-    if (stderr.Result.Length > 0)
-        Console.Error.Write(stderr.Result);
-    if (process.ExitCode != 0)
-        throw new InvalidOperationException($"{file} exited with {process.ExitCode}");
-    return stdout;
 }
 
 sealed record JType(string Name, JType[] Args, int Rank, bool VarArgs = false)
@@ -238,12 +215,6 @@ sealed class Rosetta
         }
         return result;
     }
-
-    private static YamlDotNet.RepresentationModel.YamlNode? Child(YamlDotNet.RepresentationModel.YamlNode? node, string key) =>
-        node is YamlDotNet.RepresentationModel.YamlMappingNode map && map.Children.TryGetValue(key, out var value) ? value : null;
-
-    private static string? Text(YamlDotNet.RepresentationModel.YamlNode? node, string key) =>
-        Child(node, key) is YamlDotNet.RepresentationModel.YamlScalarNode { Value: { Length: > 0 } value } ? value : null;
 }
 
 sealed class JClass(string name, string? superclass, string flags, string simpleName)
@@ -305,6 +276,9 @@ sealed class Generator
         "describeConstable", "getDeclaringClass", "compareTo",
     ];
 
+    // Java formats their varargs with toString, so a C# int (a Double by the time it reaches Java) would print as "3.0".
+    private static readonly HashSet<string> TextFunctions = ["getText", "getTextOrNull"];
+
     private static readonly HashSet<string> ListTypes =
         ["java.util.List", "java.util.ArrayList", "java.util.LinkedList", "java.util.Stack", "java.util.Vector"];
 
@@ -317,17 +291,6 @@ sealed class Generator
         ["java.lang.Character"] = "char?", ["java.lang.Integer"] = "int?", ["java.lang.Long"] = "long?",
         ["java.lang.Float"] = "float?", ["java.lang.Double"] = "double?", ["java.lang.Number"] = "double?",
     };
-
-    private static readonly HashSet<string> Keywords =
-    [
-        "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "checked", "class", "const",
-        "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event", "explicit", "extern",
-        "false", "finally", "fixed", "float", "for", "foreach", "goto", "if", "implicit", "in", "int", "interface",
-        "internal", "is", "lock", "long", "namespace", "new", "null", "object", "operator", "out", "override",
-        "params", "private", "protected", "public", "readonly", "ref", "return", "sbyte", "sealed", "short", "sizeof",
-        "stackalloc", "static", "string", "struct", "switch", "this", "throw", "true", "try", "typeof", "uint",
-        "ulong", "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while",
-    ];
 
     // Members of JavaObject (and object) a generated member must not replace.
     private static readonly HashSet<string> ReservedMembers =
@@ -371,7 +334,7 @@ sealed class Generator
             code.AppendLine($"namespace {Namespace(package.Key)};").AppendLine();
             foreach (var type in package.OrderBy(c => c.Name, StringComparer.Ordinal))
                 WriteClass(code, type, "");
-            File.WriteAllText(Path.Combine(directory, package.Key + ".cs"), code.ToString());
+            File.WriteAllText(Path.Combine(directory, package.Key + ".g.cs"), code.ToString());
             files++;
         }
 
@@ -389,9 +352,9 @@ sealed class Generator
             registry.AppendLine($"        byType[typeof(global::{cs})] = h => new global::{cs}(h);");
         }
         registry.AppendLine("    }").AppendLine("}");
-        File.WriteAllText(Path.Combine(directory, "JavaTypes.Registry.cs"), registry.ToString());
+        File.WriteAllText(Path.Combine(directory, "JavaTypes.Registry.g.cs"), registry.ToString());
 
-        File.WriteAllText(Path.Combine(directory, "Globals.cs"), WriteGlobals());
+        File.WriteAllText(Path.Combine(directory, "Globals.g.cs"), WriteGlobals());
         return files + 2;
     }
 
@@ -447,7 +410,7 @@ sealed class Generator
         foreach (var method in instance.Where(m => !paired.Contains(m)))
         {
             var doc = Lookup(method.DeclaringClass, method.Name, method.Parameters);
-            var parameters = Parameters(method.Parameters, doc);
+            var parameters = Parameters(method.Parameters, doc, TextFunctions.Contains(method.Name));
             Document(body, indent, doc, parameters.Names);
             var csName = members.Method(Pascal(method.Name), parameters.Types);
             var returnType = Map(method.Return);
@@ -463,6 +426,7 @@ sealed class Generator
             var table = type.SimpleName;
             if (!type.IsAbstract && !type.IsInterface)
             {
+                var constructors = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var constructor in type.Constructors.OrderBy(c => string.Join(",", c.Select(Map)), StringComparer.Ordinal))
                 {
                     Documentable++;
@@ -474,6 +438,14 @@ sealed class Generator
                     var csName = members.Method("New", parameters.Types);
                     body.AppendLine($"{indent}    public static {name} {csName}({parameters.Declaration}) => " +
                                     $"JavaStatic<{name}>(\"{table}\", \"new\"{parameters.Arguments});");
+                    // A lone GameObject parameter would clash with the wrapping constructor; New still covers it.
+                    if (parameters.Types != "global::Wrench.GameObject" && constructors.Add(parameters.Types))
+                    {
+                        Document(body, indent, doc, parameters.Names);
+                        body.AppendLine($"{indent}    public {name}({parameters.Declaration}) : this(JavaNew(\"{table}\"{parameters.Arguments}))")
+                            .AppendLine($"{indent}    {{")
+                            .AppendLine($"{indent}    }}");
+                    }
                 }
             }
             foreach (var method in type.Methods.Where(m => m.IsStatic && m.DeclaringClass == type.Name && IsJavaIdentifier(m.Name))
@@ -481,7 +453,7 @@ sealed class Generator
                          .OrderBy(m => m.Name, StringComparer.Ordinal).ThenBy(Key, StringComparer.Ordinal))
             {
                 var doc = Lookup(method.DeclaringClass, method.Name, method.Parameters);
-                var parameters = Parameters(method.Parameters, doc);
+                var parameters = Parameters(method.Parameters, doc, TextFunctions.Contains(method.Name));
                 Document(body, indent, doc, parameters.Names);
                 var csName = members.Method(Pascal(method.Name), parameters.Types);
                 var returnType = Map(method.Return);
@@ -551,7 +523,7 @@ sealed class Generator
         return doc;
     }
 
-    private (string Declaration, string Arguments, string Types, string[] Names) Parameters(JType[] types, RMember? doc = null)
+    private (string Declaration, string Arguments, string Types, string[] Names) Parameters(JType[] types, RMember? doc = null, bool formatsArguments = false)
     {
         var used = new HashSet<string>();
         var declarations = new List<string>();
@@ -575,7 +547,8 @@ sealed class Generator
                 // Kahlua spreads trailing Lua arguments into a Java varargs array, so C# spreads them too.
                 declarations.Add($"params {Map(type with { Rank = type.Rank - 1, VarArgs = false })}[] {escaped}");
                 var fixedArguments = string.Concat(names.SkipLast(1).Select(n => n + ", "));
-                return (string.Join(", ", declarations), $", [{fixedArguments}.. {escaped}]", string.Join(",", types.Select(Map)), [.. names]);
+                var spread = formatsArguments ? $"global::Zomboid.Java.JavaObject.TextArguments({escaped})" : escaped;
+                return (string.Join(", ", declarations), $", [{fixedArguments}.. {spread}]", string.Join(",", types.Select(Map)), [.. names]);
             }
             declarations.Add($"{csType} {escaped}");
         }
@@ -612,7 +585,7 @@ sealed class Generator
         if (string.IsNullOrWhiteSpace(notes))
             return null;
         var text = Regex.Replace(notes.Trim(), @"\s+", " ");
-        return text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+        return XmlEscape(text);
     }
 
     private string ParameterName(JType type, string csType)
@@ -665,7 +638,7 @@ sealed class Generator
                      .ThenBy(g => string.Join(",", g.Parameters.Select(Map)), StringComparer.Ordinal))
         {
             var doc = Lookup(GlobalObject, global.LuaName, global.Parameters);
-            var parameters = Parameters(global.Parameters, doc);
+            var parameters = Parameters(global.Parameters, doc, TextFunctions.Contains(global.LuaName));
             Document(code, "", doc, parameters.Names);
             var csName = members.Method(Pascal(global.LuaName), parameters.Types);
             var returnType = Map(global.Return);
@@ -717,10 +690,6 @@ sealed class Generator
     }
 
     private static bool IsJavaIdentifier(string name) => Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]*$");
-
-    private static string Pascal(string name) => char.ToUpperInvariant(name[0]) + name[1..];
-
-    private static string Camel(string name) => char.ToLowerInvariant(name[0]) + name[1..];
 
     // Hands out member names unique within one class: C# can't overload on return type, mix static and instance
     // members with one signature, or name a member like its class or a nested type.

@@ -46,7 +46,18 @@ public abstract class JavaObject : IEquatable<JavaObject>, IGameObjectView
     protected static void JavaStaticVoid(string table, string function, params object?[] args) =>
         LuaHost.Required.Call(null, StaticFunction(table, function), Unwrap(args));
 
+    /// <summary>A new Java object, as Lua's <c>Class.new(...)</c>; for the generated constructors.</summary>
+    protected static GameObject JavaNew(string table, params object?[] args) =>
+        First(LuaHost.Required.Call(null, StaticFunction(table, "new"), Unwrap(args))) as GameObject
+        ?? throw new LuaException($"{table}.new returned nothing");
+
     protected static T JavaField<T>(string table, string field) => JavaConvert.To<T>(LuaHost.Required.Index(Table(table), field));
+
+    /// <summary>Whole numbers as text, so formatting functions such as getText print 3 rather than 3.0.</summary>
+    internal static object[] TextArguments(object[] args) =>
+        [.. args.Select(a => a is int or long or short or byte or sbyte or uint or ulong or ushort
+            ? Convert.ToString(a, System.Globalization.CultureInfo.InvariantCulture)!
+            : a)];
 
     internal static T CallGlobal<T>(string function, object?[] args) =>
         JavaConvert.To<T>(First(LuaHost.Required.Call(null, Global(function), Unwrap(args))));

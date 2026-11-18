@@ -10,6 +10,11 @@ public sealed class JavaList<T> : JavaObject, IReadOnlyList<T>
     {
     }
 
+    /// <summary>A new, empty <c>java.util.ArrayList</c>.</summary>
+    public JavaList() : this(JavaNew("ArrayList"))
+    {
+    }
+
     /// <summary>A new, empty <c>java.util.ArrayList</c>, as Lua's <c>ArrayList.new()</c>.</summary>
     public static JavaList<T> New() => JavaStatic<JavaList<T>>("ArrayList", "new");
 
