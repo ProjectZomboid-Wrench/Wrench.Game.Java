@@ -9,7 +9,35 @@ internal static class JavaConvert
 {
     private static readonly ConcurrentDictionary<Type, Func<GameObject, object>> ListFactories = new();
 
-    public static T To<T>(object? value) => (T)To(value, typeof(T))!;
+    public static T To<T>(object? value)
+    {
+        if (value is T typed)
+            return typed;
+        if (value is double number && TryNumber(number, out T converted))
+            return converted;
+        return (T)To(value, typeof(T))!;
+    }
+
+    // Lua numbers to C# number types without boxing, rounding as Convert (and so IConvertible.ToType) does.
+    internal static bool TryNumber<T>(double number, out T result)
+    {
+        if (typeof(T) == typeof(float))
+            result = (T)(object)Convert.ToSingle(number);
+        else if (typeof(T) == typeof(int))
+            result = (T)(object)Convert.ToInt32(number);
+        else if (typeof(T) == typeof(long))
+            result = (T)(object)Convert.ToInt64(number);
+        else if (typeof(T) == typeof(short))
+            result = (T)(object)Convert.ToInt16(number);
+        else if (typeof(T) == typeof(byte))
+            result = (T)(object)Convert.ToByte(number);
+        else
+        {
+            result = default!;
+            return false;
+        }
+        return true;
+    }
 
     public static object? To(object? value, Type type)
     {

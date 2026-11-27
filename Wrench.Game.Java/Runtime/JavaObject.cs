@@ -41,17 +41,17 @@ public abstract class JavaObject : IEquatable<JavaObject>, IGameObjectView
         LuaHost.Required.CallMethod(null, self.Ref, method, Unwrap(args));
 
     protected static T JavaStatic<T>(string table, string function, params object?[] args) =>
-        JavaConvert.To<T>(First(LuaHost.Required.Call(null, StaticFunction(table, function), Unwrap(args))));
+        JavaConvert.To<T>(First(LuaHost.Required.CallStatic(null, table, function, Unwrap(args))));
 
     protected static void JavaStaticVoid(string table, string function, params object?[] args) =>
-        LuaHost.Required.Call(null, StaticFunction(table, function), Unwrap(args));
+        LuaHost.Required.CallStatic(null, table, function, Unwrap(args));
 
     /// <summary>A new Java object, as Lua's <c>Class.new(...)</c>; for the generated constructors.</summary>
     protected static GameObject JavaNew(string table, params object?[] args) =>
-        First(LuaHost.Required.Call(null, StaticFunction(table, "new"), Unwrap(args))) as GameObject
+        First(LuaHost.Required.CallStatic(null, table, "new", Unwrap(args))) as GameObject
         ?? throw new LuaException($"{table}.new returned nothing");
 
-    protected static T JavaField<T>(string table, string field) => JavaConvert.To<T>(LuaHost.Required.Index(Table(table), field));
+    protected static T JavaField<T>(string table, string field) => JavaConvert.To<T>(LuaHost.Required.GetStatic(table, field));
 
     /// <summary>Whole numbers as text, so formatting functions such as getText print 3 rather than 3.0.</summary>
     internal static object[] TextArguments(object[] args) =>
@@ -60,19 +60,10 @@ public abstract class JavaObject : IEquatable<JavaObject>, IGameObjectView
             : a)];
 
     internal static T CallGlobal<T>(string function, object?[] args) =>
-        JavaConvert.To<T>(First(LuaHost.Required.Call(null, Global(function), Unwrap(args))));
+        JavaConvert.To<T>(First(LuaHost.Required.CallGlobal(null, function, Unwrap(args))));
 
     internal static void CallGlobalVoid(string function, object?[] args) =>
-        LuaHost.Required.Call(null, Global(function), Unwrap(args));
-
-    private static object StaticFunction(string table, string function) =>
-        LuaHost.Required.Index(Table(table), function) ?? throw new LuaException($"{table}.{function} is nil");
-
-    private static GameObject Table(string name) =>
-        LuaHost.Required.GetGlobal(name) as GameObject ?? throw new LuaException($"global '{name}' is not exposed");
-
-    private static object Global(string name) =>
-        LuaHost.Required.GetGlobal(name) ?? throw new LuaException($"global '{name}' is nil");
+        LuaHost.Required.CallGlobal(null, function, Unwrap(args));
 
     private static object? First(object?[] results) => results.Length > 0 ? results[0] : null;
 
